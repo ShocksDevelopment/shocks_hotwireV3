@@ -5,25 +5,25 @@ Config.Enabled = true
 Config.Integrations = {
     keys = {
         provider = 'shocks', -- auto | shocks | qbx | off
-        shocksResource = 'shocks_vehiclekeys',
+        shocksResource = 'SHOCKS-vehiclekeysV3',
         qbxResource = 'qbx_vehiclekeys',
         autoOrder = { 'shocks', 'qbx' },
         required = true,
     },
     garage = {
         enabled = true,
-        resource = 'shocks_garage',
+        resource = 'SHOCKS-garageV3',
         notifyGarageOnSuccess = true,
     },
 }
 
 -- Legacy aliases kept for older configs. The bridge above is authoritative.
-Config.KeysResource = 'shocks_vehiclekeys'
+Config.KeysResource = 'SHOCKS-vehiclekeysV3'
 Config.RequireVehicleKeysResource = true
 
 Config.Command = 'hotwire'
-Config.Keybind = 'H'
-Config.AutoStart = true
+Config.Keybind = 'Q'
+Config.AutoStart = false
 Config.AutoStartDelay = 700
 Config.Distance = 4.0
 Config.RequireStopped = true
@@ -40,13 +40,26 @@ Config.AllowedVehicleClasses = {
 Config.AllowCars = true
 
 Config.Minigame = {
-    sequenceLength = 5,
-    revealMs = 1600,
-    timeoutSeconds = 18,
-    attempts = 3,
+    sequenceLength = 3,
+
+    revealMs = 6000,
+
+    timeoutSeconds = 45,
+
+    attempts = 5,
+
     repeatSequenceOnFail = true,
-    resetRevealMs = 1100,
-    keys = { 'W', 'A', 'S', 'D', 'Q', 'E' },
+
+    resetRevealMs = 2500,
+
+    keys = {
+        'W',
+        'A',
+        'S',
+        'D',
+        'Q',
+        'E',
+    },
 }
 
 Config.Success = {
