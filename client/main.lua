@@ -1,0 +1,192 @@
+local state = { active = false, vehicle = 0, netId = 0, token = nil }
+local cooldownUntil = 0
+local autoPending = false
+
+local function notify(message, kind)
+    lib.notify({ description = message, type = kind or 'inform' })
+end
+
+local function close()
+    if not state.active then return end
+    state.active = false
+    SendNUIMessage({ action = 'close' })
+    SetNuiFocus(false, false)
+    state = { active = false, vehicle = 0, netId = 0, token = nil }
+end
+
+local function getVehicle()
+    local vehicle = GetVehiclePedIsIn(cache.ped, false)
+    if vehicle ~= 0 then return vehicle end
+    local coords = GetEntityCoords(cache.ped)
+    local pool = GetGamePool('CVehicle')
+    local best, dist
+    for i = 1, #pool do
+        local candidate = pool[i]
+        if DoesEntityExist(candidate) then
+            local d = #(coords - GetEntityCoords(candidate))
+            if d <= Config.Distance and (not dist or d < dist) then best, dist = candidate, d end
+        end
+    end
+    return best or 0
+end
+
+local function start(vehicle)
+    if not Config.Enabled or state.active then return false end
+    if GetGameTimer() < cooldownUntil then return false end
+    vehicle = vehicle or getVehicle()
+    if vehicle == 0 or not DoesEntityExist(vehicle) then
+        notify('You need to be beside the vehicle you want to hotwire.', 'error')
+        return false
+    end
+    if #(GetEntityCoords(cache.ped) - GetEntityCoords(vehicle)) > Config.Distance then
+        notify('You are too far away from the vehicle.', 'error')
+        return false
+    end
+    local class = GetVehicleClass(vehicle)
+    local allowed = (class == 8 and Config.AllowedVehicleClasses[8]) or ((class == 13 or class == 14 or class == 15 or class == 16) and Config.AllowedVehicleClasses[class]) or ((class ~= 8 and class ~= 13 and class ~= 14 and class ~= 15 and class ~= 16) and Config.AllowCars)
+    if not allowed then
+        notify('This type of vehicle cannot be hotwired.', 'error')
+        return false
+    end
+    if Config.MustBeDriver and GetPedInVehicleSeat(vehicle, -1) ~= cache.ped then
+        notify('You need to be in the driver seat to hotwire this vehicle.', 'error')
+        return false
+    end
+    if Config.RequireStopped and GetEntitySpeed(vehicle) > 0.5 then
+        notify('The vehicle must be stopped.', 'error')
+        return false
+    end
+
+    local keyResource = HotwireKeyBridge.Resolve()
+    local keysRequired = Config.Integrations.keys.required ~= false
+    if not keyResource and keysRequired then
+        notify('No configured vehicle key provider is running.', 'error')
+        return false
+    end
+
+    local netId = NetworkGetNetworkIdFromEntity(vehicle)
+    local challenge = lib.callback.await('shocks_hotwire:server:begin', false, netId)
+    if not challenge then
+        notify('This vehicle cannot be hotwired right now.', 'error')
+        return false
+    end
+
+    state.active = true
+    state.vehicle = vehicle
+    state.netId = netId
+    state.token = challenge.token
+    SendNUIMessage({ action = 'open', data = challenge })
+    SetNuiFocus(true, true)
+    return true
+end
+
+exports('StartHotwire', function(vehicle)
+    return start(vehicle)
+end)
+
+exports('IsActive', function()
+    return state.active
+end)
+
+RegisterCommand(Config.Command, function()
+    start()
+end, false)
+RegisterKeyMapping(Config.Command, 'SHOCKS: Hotwire vehicle', 'keyboard', Config.Keybind)
+
+RegisterNUICallback('finish', function(data, cb)
+    if not state.active then cb({ ok = false }) return end
+    local result = lib.callback.await('shocks_hotwire:server:finish', false, state.token, state.netId, data.input)
+    if result and result.success then
+        local vehicle = state.vehicle
+        close()
+        cooldownUntil = GetGameTimer() + (Config.CooldownSeconds * 1000)
+        if Config.Success.unlock and Config.Bridge.unlockOnSuccess then SetVehicleDoorsLocked(vehicle, 1) end
+        if Config.Success.startEngine and Config.Bridge.startEngineOnSuccess then SetVehicleEngineOn(vehicle, true, false, true) end
+        SetVehicleUndriveable(vehicle, false)
+        SetVehicleNeedsToBeHotwired(vehicle, false)
+        if Config.Success.notify then notify('Hotwire successful. Keys added.', 'success') end
+        cb({ ok = true, success = true })
+        return
+    end
+
+    if result and result.attemptsLeft and result.attemptsLeft > 0 then
+        cb({ ok = true, success = false, attemptsLeft = result.attemptsLeft, sequence = result.sequence })
+        return
+    end
+
+    if Config.Failure.alarm then
+        SetVehicleAlarm(state.vehicle, true)
+        StartVehicleAlarm(state.vehicle)
+        CreateThread(function()
+            Wait(Config.Failure.alarmDuration)
+            if DoesEntityExist(state.vehicle) then SetVehicleAlarm(state.vehicle, false) end
+        end)
+    end
+    close()
+    if Config.Failure.notify then notify('Hotwire failed.', 'error') end
+    cb({ ok = true, success = false, attemptsLeft = 0 })
+end)
+
+RegisterNUICallback('cancel', function(_, cb)
+    close()
+    cb({ ok = true })
+end)
+
+CreateThread(function()
+    Wait(1000)
+    if GetResourceState('ox_target') ~= 'started' then return end
+    exports.ox_target:addGlobalVehicle({
+        {
+            name = 'shocks_hotwire_vehicle',
+            icon = 'fa-solid fa-bolt',
+            label = 'Hotwire Vehicle',
+            distance = Config.Distance,
+            canInteract = function(entity)
+                if not Config.Enabled or state.active then return false end
+                if GetPedInVehicleSeat(entity, -1) ~= cache.ped then return false end
+                local resource = HotwireKeyBridge.Resolve()
+                if resource then
+                    local ok, has = pcall(function() return exports[resource]:HasKeys(entity) end)
+                    return ok and not has
+                end
+                return Config.Integrations.keys.required ~= true
+            end,
+            onSelect = function(data)
+                start(data.entity)
+            end
+        }
+    })
+end)
+
+CreateThread(function()
+    if not Config.AutoStart then return end
+    while true do
+        Wait(850)
+        if not state.active and HotwireKeyBridge.Resolve() then
+            local vehicle = GetVehiclePedIsIn(cache.ped, false)
+            if vehicle ~= 0 and GetPedInVehicleSeat(vehicle, -1) == cache.ped then
+                local resource = HotwireKeyBridge.Resolve()
+                local ok, has = pcall(function() return exports[resource]:HasKeys(vehicle) end)
+                if ok and not has and GetIsVehicleEngineRunning(vehicle) == false and not IsPauseMenuActive() and not autoPending then
+                    autoPending = true
+                    SetTimeout(Config.AutoStartDelay, function()
+                        autoPending = false
+                        local current = GetVehiclePedIsIn(cache.ped, false)
+                        if current ~= 0 and GetPedInVehicleSeat(current, -1) == cache.ped then
+                            start(current)
+                        end
+                    end)
+                end
+            end
+        end
+    end
+end)
+
+AddEventHandler('onResourceStop', function(resource)
+    if resource == cache.resource then
+        if GetResourceState('ox_target') == 'started' then pcall(function() exports.ox_target:removeGlobalVehicle('shocks_hotwire_vehicle') end) end
+        close()
+    end
+end)
+
+exports('GetKeyProvider', function() return HotwireKeyBridge.GetProvider() end)
